@@ -2,6 +2,6 @@
 {% block primary_content_inner %}
   {{ super() }}
   {% block discourse_comments %}
-    {{ h.discourse_comments( h.full_current_url() ) }}
+    {{ h.discourse_comments( h.url_for('showcase.read', id=showcase.name, qualified=True )) }}
   {% endblock %}
 {% endblock %}

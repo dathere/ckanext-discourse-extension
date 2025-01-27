@@ -1,5 +1,5 @@
 {% ckan_extends %}
 {% block group_extras %}
   {{ super() }}
-  {{ h.discourse_comments( h.full_current_url() ) }}
+  {{ h.discourse_comments( h.url_for('group.read', id=group.name, qualified=True )) }}
 {% endblock %}

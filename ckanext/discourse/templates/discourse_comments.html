@@ -1,16 +1,17 @@
-<div class="module-content discourse-content">
-{#
-  <div id="discourse-comments" style="display:none; height:0; width:0;"></div>
+
+
+<div id='discourse-comments'></div>
+<meta name='discourse-username' content='Minhajuddin'>
 
 <script type="text/javascript">
-  DiscourseEmbed = { discourseUrl: '{{ discourse_url }}',
-                     discourseEmbedUrl: '{{ topic_id }}' };
-  // console.log(DiscourseEmbed);
+  DiscourseEmbed = {
+    discourseUrl: 'https://community.civicdataecosystem.org/',
+    discourseEmbedUrl: 'http://localhost:5000/dataset/entry-123',
+    discourseReferrerPolicy: 'strict-origin-when-cross-origin'};
+
   (function() {
     var d = document.createElement('script'); d.type = 'text/javascript'; d.async = true;
     d.src = DiscourseEmbed.discourseUrl + 'javascripts/embed.js';
     (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(d);
   })();
 </script>
-#}
-</div>

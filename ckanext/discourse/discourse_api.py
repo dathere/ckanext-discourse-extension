@@ -1,83 +1,123 @@
-#!/usr/bin/env python
-import requests
 import json
-
+import requests
 import logging
 
 log = logging.getLogger(__name__)
 
-requests.packages.urllib3.disable_warnings()
 REQUEST_TIMEOUT = 5
 
-class DiscourseApi():
-    def __init__(self, host, username, api_key):
-        self.host = host
-        self.username = username
-        self.api_key = api_key
+class DiscourseApi:
+    """
+    Helper class for interacting with the Discourse API.
+    """
 
-    # Use discourse API to create topic
+    def __init__(self, discourse_url, api_username, api_key):
+        self.discourse_url = discourse_url.rstrip('/')
+        self.api_username = api_username
+        self.api_key = api_key
+        self.headers = {
+            'Api-Key': self.api_key,
+            'Api-Username': self.api_username,
+            'Content-Type': 'application/json'
+        }
+        log.debug(f"Discourse API initialized for URL: {self.discourse_url}")
+
     def create_topic(self, title, raw, category_id):
-        data_dict = {
+        """
+        Creates a new topic in Discourse.
+        """
+        url = '{0}/posts.json'.format(self.discourse_url)
+        payload = {
             'title': title,
             'raw': raw,
-            'category': category_id
+            'category': category_id,
+            'skip_validations': 'true'
         }
-        return self.make_request('POST', '/posts.json', data_dict)
+        log.debug(f"Creating Discourse topic: URL={url}, Payload={payload}")
+        try:
+            r = requests.post(
+                url,
+                headers=self.headers,
+                data=json.dumps(payload),
+                timeout=REQUEST_TIMEOUT,
+                verify=False
+            )
+            r.raise_for_status()
+            log.info(f'Discourse topic created: {title}')
+            return r.json()
+        except requests.exceptions.RequestException as e:
+            log.error(f'Error creating Discourse topic: {e}')
+            return None
 
-    # Use discourse API to update a post
-    def update_post(self, post_id, raw):
-        data_dict = {
-            'post[raw]': raw,
-        }
-        return self.make_request('PUT', '/posts/{0}.json'.format(post_id), data_dict)
-
-    # Use discourse API to get list of topics in a category
     def get_topic_list(self, category_id):
+        """
+        Retrieves a list of topics from a Discourse category.
+        """
         topics = []
         page = 0
         while True:
-            category = self.make_request('GET', '/c/{0}.json?page={1}'.format(category_id, page))
-            if category.get('topic_list', {}).get('topics'):
-                topics.extend(category.get('topic_list', {}).get('topics'))
-            else:
+            url = '{0}/c/{1}.json?page={2}'.format(self.discourse_url, category_id, page)
+            log.debug(f"Getting Discourse topic list: URL={url}")
+            try:
+                r = requests.get(
+                    url,
+                    headers=self.headers,
+                    timeout=REQUEST_TIMEOUT,
+                    verify=False
+                )
+                r.raise_for_status()
+                category = r.json()
+                if category.get('topic_list', {}).get('topics'):
+                    topics.extend(category.get('topic_list', {}).get('topics'))
+                    page += 1
+                else:
+                    break
+            except requests.exceptions.RequestException as e:
+                log.error(f'Error getting Discourse topic list: {e}')
                 break
-            page += 1
         return topics
 
-    # Use discourse API to get list of posts in a topic
     def get_topic_posts(self, topic_id):
-        post_stream = self.make_request('GET', '/t/{0}.json'.format(topic_id))
-        return post_stream.get('post_stream', {}).get('posts', [])
-
-    # Make request and return json response
-    def make_request(self, method, path, data_dict={}):
-        if method not in ['GET', 'POST', 'PUT']:
-            log.error('Invalid HTTP request methods used')
-            return
-
-        url = self.host + path
-
-        headers = {
-            'Content-Type': 'multipart/form-data;',
-            'Api-Key': self.api_key,
-            'Api-Username': self.username
-        }
-        json_response = {}
+        """
+        Retrieves posts from a Discourse topic.
+        """
+        url = '{0}/t/{1}.json'.format(self.discourse_url, topic_id)
+        log.debug(f"Getting Discourse topic posts: URL={url}")
         try:
-            response = requests.request(
-                method,
+            r = requests.get(
                 url,
-                data = data_dict,
-                headers = headers,
+                headers=self.headers,
                 timeout=REQUEST_TIMEOUT,
-                verify = False
+                verify=False
             )
-            json_response = response.json()
-        except requests.exceptions.HTTPError as error:
-            log.debug('HTTP error: {}'.format(error))
-        except requests.exceptions.Timeout:
-            log.warn('URL time out for {0} after {1}s'.format(category_url, REQUEST_TIMEOUT))
-        except Exception as e:
-            log.error(e)
+            r.raise_for_status()
+            return r.json()['post_stream']['posts']
+        except requests.exceptions.RequestException as e:
+            log.error(f'Error getting Discourse topic posts: {e}')
+            return []
 
-        return json_response
+    def update_post(self, post_id, raw):
+        """
+        Updates a post in a Discourse topic.
+        """
+        url = '{0}/posts/{1}.json'.format(self.discourse_url, post_id)
+        payload = {
+            'post': {
+                'raw': raw
+            }
+        }
+        log.debug(f"Updating Discourse post: URL={url}, Payload={payload}")
+        try:
+            r = requests.put(
+                url,
+                headers=self.headers,
+                data=json.dumps(payload),
+                timeout=REQUEST_TIMEOUT,
+                verify=False
+            )
+            r.raise_for_status()
+            log.info(f'Discourse post updated: {post_id}')
+            return r.json()
+        except requests.exceptions.RequestException as e:
+            log.error(f'Error updating Discourse post: {e}')
+            return None

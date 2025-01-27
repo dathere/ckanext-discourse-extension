@@ -1,0 +1,5 @@
+discourse-css:
+  contents:
+    - discourse.css
+  output: discourse/%(version)s_discourse.css
+  filters: cssrewrite
