@@ -196,7 +196,7 @@ def create_discourse_topic(pkg_dict, settings):
     try:
         # 1. Create Discourse topic
         api = DiscourseApi(settings)
-        site_url = config['ckan.site_url'].rstrip('/')
+        site_url = config['discourse.site_url'].rstrip('/')
         pkg_url = f"{site_url}/dataset/{pkg_dict['name']}" 
         
         # Generate content
@@ -263,7 +263,7 @@ def update_discourse_topic(pkg_dict, settings):
     """Background job: Update existing Discourse topic."""
     try:
         api = DiscourseApi(settings)
-        site_url = config['ckan.site_url'].rstrip('/')
+        site_url = config['discourse.site_url'].rstrip('/')
         pkg_url = f"{site_url}/dataset/{pkg_dict['name']}"
         
         content = f"## {pkg_dict['title']}\n\n{pkg_dict.get('notes', '')}\n\n"
