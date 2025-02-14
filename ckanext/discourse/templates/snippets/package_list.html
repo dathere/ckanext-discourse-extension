@@ -1,5 +1,5 @@
 {% ckan_extends %}
 {% block package_list_inner %}
-  {% set num_topics = h.discourse_sync() %}
+  {% set num_topics = h.discourse_comments_count() %}
   {{ super() }}
 {% endblock %}

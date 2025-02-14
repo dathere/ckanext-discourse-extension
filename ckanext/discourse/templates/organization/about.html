@@ -1,5 +1,0 @@
-{% ckan_extends %}
-{% block organization_extras %}
-  {{ super() }}
-  {{ h.discourse_comments(h.url_for('organization.read', id=group.name, qualified=True)) }}
-{% endblock %}

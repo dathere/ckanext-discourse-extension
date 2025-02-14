@@ -2,23 +2,13 @@ import ckan.plugins as plugins
 import ckan.plugins.toolkit as toolkit
 import ckan.logic as logic
 import requests
-import time
-import re
 import json
-from datetime import timedelta
-from ckan.plugins.toolkit import asbool
-from ckan.common import config
-from ckanext.discourse.interfaces import IDiscourse
-from ckanext.discourse.discourse_api import DiscourseApi
-import ckan.lib.jobs as jobs
-
 import logging
+from ckan.common import config
+from ckan.lib.jobs import enqueue
 
 log = logging.getLogger(__name__)
-
 get_action = logic.get_action
-
-REQUEST_TIMEOUT = 5
 
 class DiscoursePlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.IConfigurable)
@@ -26,290 +16,272 @@ class DiscoursePlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.ITemplateHelpers)
     plugins.implements(plugins.IPackageController, inherit=True)
 
-    # Class-level attributes
-    next_sync = 0
-    topic_lookup_dict = {}
-    active_conversations = 0
-    discourse_category_id = ''
-    discourse_metadata_fields = []
-    discourse_url = None
-    discourse_username = None
-    discourse_count_cache_age = 60
-    discourse_ckan_category = None
-    discourse_debug = False
-    discourse_api_key = None
-    verify_ssl = True
-
-    def configure(self, config):
-        log.debug("Configuring Discourse plugin")
-
-        # Load configuration values
-        DiscoursePlugin.discourse_url = config.get('discourse.url')
-        DiscoursePlugin.discourse_username = config.get('discourse.username')
-        DiscoursePlugin.discourse_count_cache_age = int(config.get('discourse.count_cache_age', 60))
-        DiscoursePlugin.discourse_ckan_category = config.get('discourse.ckan_category')
-        DiscoursePlugin.discourse_debug = asbool(config.get('discourse.debug', False))
-        DiscoursePlugin.discourse_api_key = config.get('discourse.api_key', '')
-        DiscoursePlugin.discourse_category_id = config.get('discourse.category_id', '')
-        DiscoursePlugin.discourse_metadata_fields = config.get('discourse.metadata_fields', '').split()
-        DiscoursePlugin.verify_ssl = asbool(config.get('discourse.verify_ssl', True))
-
-        # Validate required configuration
-        if not DiscoursePlugin.discourse_url:
-            log.error("Missing required configuration: discourse.url")
-        if not DiscoursePlugin.discourse_ckan_category:
-            log.error("Missing required configuration: discourse.ckan_category")
-
-        # Initialize API client
-        self.discourse_api = DiscourseApi(
-            DiscoursePlugin.discourse_url,
-            DiscoursePlugin.discourse_username,
-            DiscoursePlugin.discourse_api_key,
-            DiscoursePlugin.verify_ssl
-        )
-
-        # Initial sync
-        if DiscoursePlugin.next_sync == 0:
-            DiscoursePlugin.next_sync = time.time() + DiscoursePlugin.discourse_count_cache_age
-            self.discourse_sync()
-
-    def update_config(self, config_):
-        toolkit.add_template_directory(config_, 'templates')
-        toolkit.add_public_directory(config_, 'public')
-        toolkit.add_resource('assets', 'discourse')
-
-    @classmethod
-    def discourse_sync(cls):
-        if time.time() < cls.next_sync and cls.topic_lookup_dict:
-            return cls.active_conversations
-
-        log.info("Starting Discourse sync...")
-        new_lookup = {}
-        active = 0
-
-        try:
-            topics = cls.discourse_api.get_category_topics(cls.discourse_category_id)
-            for topic in topics:
-                # Get first post content to find CKAN dataset ID
-                posts = cls.discourse_api.get_topic_posts(topic['id'])
-                if posts:
-                    first_post = posts[0]['raw']
-                    match = re.search(r'<!-- CKAN_DATASET_ID: (.+) -->', first_post)
-                    if match:
-                        dataset_id = match.group(1)
-                        comment_count = topic['posts_count'] - 1  # Subtract initial post
-                        new_lookup[dataset_id] = comment_count
-                        if comment_count > 0:
-                            active += 1
-
-            cls.topic_lookup_dict = new_lookup
-            cls.active_conversations = active
-            cls.next_sync = time.time() + cls.discourse_count_cache_age
-            log.info(f"Sync complete. Found {active} active conversations.")
-
-        except Exception as e:
-            log.error(f"Sync failed: {str(e)}")
-            cls.next_sync = time.time() + 60  # Retry sooner on failure
-
-        return active
-
-    @classmethod
-    def discourse_comments(cls, canonical_url=''):
-        context = {'ignore_auth': True}
-        data = {
-            'discourse_url': cls.discourse_url,
-            'topic_id': '',
-            'discourse_username': cls.discourse_username,
-            'embed_url': canonical_url
+    def configure(self, config_):
+        """Load and validate configuration settings."""
+        self.settings = {
+            'url': config_.get('discourse.url', '').rstrip('/'),
+            'api_key': config_.get('discourse.api_key'),
+            'username': config_.get('discourse.username'),
+            'category_id': config_.get('discourse.category_id'),
+            'metadata_fields': config_.get('discourse.metadata_fields', '').split(),
+            'verify_ssl': toolkit.asbool(config_.get('discourse.verify_ssl', True))
         }
 
-        try:
-            if not canonical_url:
-                pkg = toolkit.g.pkg_dict
-                if pkg:
-                    data['topic_id'] = pkg['name']
-                    data['embed_url'] = toolkit.url_for('dataset.read', id=pkg['name'], _external=True)
-            else:
-                # Extract dataset name from URL
-                match = re.search(r'/dataset/([^/]+)', canonical_url)
-                if match:
-                    data['topic_id'] = match.group(1)
+        if not self._validate_config():
+            log.error("Discourse integration disabled due to invalid configuration")
+            self.settings = None
 
-            # Allow other plugins to modify the data
-            for plugin in plugins.PluginImplementations(IDiscourse):
-                data = plugin.before_render_comments(data)
+    def _validate_config(self):
+        """Check required configuration settings."""
+        required = ['url', 'api_key', 'username', 'category_id']
+        return all(self.settings.get(key) for key in required)
 
-        except Exception as e:
-            log.error(f"Error preparing comments: {str(e)}")
-
-        return toolkit.render_snippet(
-            'discourse_comments_debug.html' if cls.discourse_debug else 'discourse_comments.html',
-            data
-        )
-
-    @classmethod
-    def discourse_comments_count(cls, topic_id):
-        return cls.topic_lookup_dict.get(topic_id, 0)
+    def update_config(self, config_):
+        """Add template directory."""
+        toolkit.add_template_directory(config_, 'templates')
+        toolkit.add_resource('assets', 'discourse')
 
     def get_helpers(self):
+        """Register template helpers."""
         return {
             'discourse_comments': self.discourse_comments,
             'discourse_comments_count': self.discourse_comments_count,
-            'discourse_sync': self.discourse_sync,
-            'discourse_category_url': lambda: f"{self.discourse_url}c/{self.discourse_category_id}",
-            'discourse_sync_status': lambda: {
-                'next_sync': self.next_sync,
-                'active_conversations': self.active_conversations
-            }
         }
 
-    # IPackageController implementation
     def after_dataset_create(self, context, pkg_dict):
-        if not pkg_dict.get('private'):
-            jobs.enqueue(
+        """Queue topic creation job."""
+        if self.settings and not pkg_dict.get('private'):
+            enqueue(
                 create_discourse_topic,
-                args=[pkg_dict, self.discourse_category_id, self.discourse_metadata_fields,
-                      self.discourse_api_key, self.discourse_username,
-                      self.discourse_url, config.get('ckan.site_url')]
+                args=[pkg_dict, self.settings],
+                title=f"Create Discourse topic for {pkg_dict['id']}"
             )
 
     def after_dataset_update(self, context, pkg_dict):
-        if not pkg_dict.get('private'):
-            jobs.enqueue(
+        """Queue topic update job."""
+        if self.settings and not pkg_dict.get('private') and pkg_dict.get('discourse_topic_id'):
+            enqueue(
                 update_discourse_topic,
-                args=[pkg_dict, self.discourse_category_id, self.discourse_metadata_fields,
-                      self.discourse_api_key, self.discourse_username,
-                      self.discourse_url, config.get('ckan.site_url')]
+                args=[pkg_dict, self.settings],
+                title=f"Update Discourse topic for {pkg_dict['id']}"
             )
 
-def create_discourse_topic(pkg_dict, category_id, metadata_fields, api_key, username, base_url, site_url):
-    api = DiscourseApi(base_url, username, api_key)
-    
-    try:
-        raw = _generate_discourse_content(pkg_dict, metadata_fields, site_url)
-        response = api.create_topic(
-            title=pkg_dict['title'],
-            raw=raw,
-            category_id=category_id,
-            tags=pkg_dict.get('tags', [])
-        )
-        
-        if response and 'id' in response:
-            log.info(f"Created Discourse topic {response['id']} for dataset {pkg_dict['id']}")
-        else:
-            log.error("Failed to create Discourse topic")
+    def discourse_comments(self, pkg_dict=None):
+        """Render comments section."""
+        try:
+            pkg = pkg_dict or toolkit.g.pkg_dict
+            extras_dict = self._get_extras_dict(pkg) 
+            topic_id = extras_dict.get('discourse_topic_id')
+            discourse_url = extras_dict.get('discourse_url', self.settings['url'])
+            
+            log.debug(f"Rendering comments for package: {pkg.get('name')}")
+            log.debug(f"Package extras: {extras_dict}")
+            log.debug(f"Found topic ID: {topic_id}")
 
-    except Exception as e:
-        log.error(f"Topic creation failed: {str(e)}")
+            if not topic_id:
+                return '<p class="text-muted">Comments will be available after refreshing this page</p>'
+            
+            return toolkit.render_snippet('discourse_comments.html', { 
+                'discourse_url': self.settings['url'],
+                'topic_id': topic_id
+            })
+        except Exception as e:
+            log.error(f"Error rendering comments: {str(e)}", exc_info=True)
+            return ''
 
-def update_discourse_topic(pkg_dict, category_id, metadata_fields, api_key, username, base_url, site_url):
-    api = DiscourseApi(base_url, username, api_key)
-    
-    try:
-        # Find topic by embedded dataset ID
-        topics = api.get_category_topics(category_id)
-        for topic in topics:
-            posts = api.get_topic_posts(topic['id'])
-            if posts and f"<!-- CKAN_DATASET_ID: {pkg_dict['name']} -->" in posts[0]['raw']:
-                raw = _generate_discourse_content(pkg_dict, metadata_fields, site_url)
-                api.update_post(
-                    post_id=posts[0]['id'],
-                    raw=raw
-                )
-                log.info(f"Updated Discourse topic {topic['id']} for dataset {pkg_dict['name']}")
-                return
+    def discourse_comments_count(self, pkg_dict=None):
+        """Get comment count from Discourse."""
+        try:
+            pkg = pkg_dict or toolkit.g.pkg_dict
+            extras_dict = self._get_extras_dict(pkg)
+            topic_id = extras_dict.get('discourse_topic_id')
+            
+            if not (self.settings and topic_id):
+                return 0
+                
+            log.debug(f"Getting comment count for topic: {topic_id}")
+            api = DiscourseApi(self.settings)
+            count = api.get_topic_comment_count(topic_id)
+            log.debug(f"Comment count retrieved: {count}")
+            return count
+            
+        except Exception as e:
+            log.error(f"Error getting comment count: {str(e)}", exc_info=True)
+            return 0
 
-        log.warning(f"No Discourse topic found for dataset {pkg_dict['name']}")
-
-    except Exception as e:
-        log.error(f"Topic update failed: {str(e)}")
-
-def _generate_discourse_content(pkg_dict, metadata_fields, site_url):
-    dataset_url = f"{site_url}/dataset/{pkg_dict['name']}"
-    content = f"<!-- CKAN_DATASET_ID: {pkg_dict['name']} -->\n"
-    content += f"<h1>{pkg_dict.get('title', pkg_dict['name'])}</h1>"
-    
-    if pkg_dict.get('notes'):
-        content += f"<div class='ckan-description'>{pkg_dict['notes']}</div>"
-    
-    content += "<div class='ckan-metadata'>"
-    for field in metadata_fields:
-        if field in pkg_dict:
-            content += f"<p><strong>{field.title()}</strong>: {pkg_dict[field]}</p>"
-    
-    content += f"<p><a href='{dataset_url}'>View on CKAN</a></p>"
-    content += "</div>"
-    
-    return content
+    def _get_extras_dict(self, pkg):
+        """Convert extras list to dictionary."""
+        try:
+            if isinstance(pkg.get('extras'), list):
+                return {item['key']: item['value'] for item in pkg['extras']}
+            if isinstance(pkg.get('extras'), dict):
+                return pkg['extras']
+            return {}
+        except Exception as e:
+            log.error(f"Error processing extras: {str(e)}")
+            return {}
 
 class DiscourseApi:
-    def __init__(self, base_url, username, api_key, verify_ssl=True):
-        self.base_url = base_url.rstrip('/')
+    """Discourse API client with proper configuration handling."""
+    
+    def __init__(self, settings):
+        self.base_url = settings['url']
         self.headers = {
-            'Api-Key': api_key,
-            'Api-Username': username,
+            'Api-Key': settings['api_key'],
+            'Api-Username': settings['username'],
             'Content-Type': 'application/json'
         }
-        self.verify_ssl = verify_ssl
+        self.verify_ssl = settings['verify_ssl']
 
-    def get_category_topics(self, category_id):
-        try:
-            response = requests.get(
-                f"{self.base_url}/c/{category_id}.json",
-                headers=self.headers,
-                verify=self.verify_ssl
-            )
-            return response.json()['topic_list']['topics']
-        except Exception as e:
-            log.error(f"Error getting category topics: {str(e)}")
-            return []
-
-    def get_topic_posts(self, topic_id):
-        try:
-            response = requests.get(
-                f"{self.base_url}/t/{topic_id}.json",
-                headers=self.headers,
-                verify=self.verify_ssl
-            )
-            return response.json()['post_stream']['posts']
-        except Exception as e:
-            log.error(f"Error getting topic posts: {str(e)}")
-            return []
-
-    def create_topic(self, title, raw, category_id, tags=None):
-        payload = {
+    def create_topic(self, title, content, category_id):
+        """Create a new Discourse topic."""
+        url = f"{self.base_url}/posts.json"
+        data = {
             'title': title,
-            'raw': raw,
+            'raw': content,
             'category': category_id,
-            'tags': tags or [],
-            'skip_validations': True
+            'skip_validations': 'true'
         }
         
-        try:
-            response = requests.post(
-                f"{self.base_url}/posts.json",
-                headers=self.headers,
-                json=payload,
-                verify=self.verify_ssl
-            )
-            return response.json()
-        except Exception as e:
-            log.error(f"Error creating topic: {str(e)}")
-            return None
+        response = requests.post(
+            url,
+            headers=self.headers,
+            json=data,
+            verify=self.verify_ssl
+        )
+        response.raise_for_status()
+        return response.json()
 
-    def update_post(self, post_id, raw):
-        payload = {
-            'post': {'raw': raw}
-        }
+    def update_topic(self, topic_id, content):
+        """Update the first post of a topic."""
+        post_id = self._get_first_post_id(topic_id)
+        url = f"{self.base_url}/posts/{post_id}"
+        data = {'post': {'raw': content}}
         
+        response = requests.put(
+            url,
+            headers=self.headers,
+            json=data,
+            verify=self.verify_ssl
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_topic_comment_count(self, topic_id):
+        """Get total posts count excluding the initial post."""
+        url = f"{self.base_url}/t/{topic_id}.json"
+        response = requests.get(
+            url, 
+            headers=self.headers,
+            verify=self.verify_ssl
+        )
+        response.raise_for_status()
+        return response.json()['posts_count'] - 1
+
+    def _get_first_post_id(self, topic_id):
+        """Retrieve the first post ID of a topic."""
+        url = f"{self.base_url}/t/{topic_id}/posts.json"
+        response = requests.get(
+            url,
+            headers=self.headers,
+            verify=self.verify_ssl
+        )
+        response.raise_for_status()
+        return response.json()['post_stream']['posts'][0]['id']
+ 
+def create_discourse_topic(pkg_dict, settings):
+    """Background job: Create Discourse topic and update dataset."""
+    log.info(f"Starting topic creation for dataset: {pkg_dict['id']}")
+    
+    try:
+        # 1. Create Discourse topic
+        api = DiscourseApi(settings)
+        site_url = config['ckan.site_url'].rstrip('/')
+        pkg_url = f"{site_url}/dataset/{pkg_dict['name']}" 
+        
+        # Generate content
+        content = f"## {pkg_dict['title']}\n\n{pkg_dict.get('notes', '')}\n\n"
+        content += f"**Dataset URL**: [View on CKAN]({pkg_url})\n\n"
+        for field in settings['metadata_fields']:
+            if value := pkg_dict.get(field):
+                content += f"**{field.title()}**: {value}\n"
+        if resources := pkg_dict.get('resources'):
+            content += "\n**Resources:**\n"
+            for res in resources:
+                res_url = f"{pkg_url}/resource/{res['id']}"
+                content += f"- [{res['name']}]({res_url})\n"
+
+        log.debug(f"Creating topic with content: {content[:200]}...")
+        result = api.create_topic(pkg_dict['title'], content, settings['category_id'])
+        topic_id = result['topic_id']
+        topic_url = f"{settings['url']}/t/{topic_id}"
+        log.info(f"Successfully created Discourse topic {topic_id}")
+
+        # 2. Update CKAN package
+        context = {'ignore_auth': True}
         try:
-            response = requests.put(
-                f"{self.base_url}/posts/{post_id}.json",
-                headers=self.headers,
-                json=payload,
-                verify=self.verify_ssl
-            )
-            return response.json()
+            log.debug(f"Fetching package {pkg_dict['id']} for update")
+            pkg = get_action('package_show')(context, {'id': pkg_dict['id']})
+            
+            # Process extras
+            extras_dict = {e['key']: e for e in pkg.get('extras', [])}
+            new_extras = {
+                'discourse_topic_id': str(topic_id),
+                'discourse_url': topic_url
+            }
+            
+            for key, value in new_extras.items():
+                if key in extras_dict:
+                    log.debug(f"Updating existing extra: {key}")
+                    extras_dict[key]['value'] = value
+                else:
+                    log.debug(f"Adding new extra: {key}")
+                    extras_dict[key] = {'key': key, 'value': value}
+            
+            pkg['extras'] = list(extras_dict.values())
+            log.debug(f"Final extras to save: {pkg['extras']}")
+
+            updated_pkg = get_action('package_update')(context, pkg)
+            log.info(f"Successfully updated package {pkg_dict['id']} with Discourse info")
+            log.debug(f"Updated package extras: {updated_pkg.get('extras')}")
+            
+        except logic.NotFound as e:
+            log.error(f"Package not found: {pkg_dict['id']} - {str(e)}")
+        except logic.ValidationError as e:
+            log.error(f"Validation error updating package: {e.error_dict}")
         except Exception as e:
-            log.error(f"Error updating post: {str(e)}")
-            return None
+            log.error(f"Unexpected error updating package: {str(e)}")
+
+    except requests.exceptions.RequestException as e:
+        log.error(f"Discourse API error: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            log.error(f"API response: {e.response.text}")
+    except Exception as e:
+        log.error(f"Unexpected error in topic creation: {str(e)}")
+
+def update_discourse_topic(pkg_dict, settings):
+    """Background job: Update existing Discourse topic."""
+    try:
+        api = DiscourseApi(settings)
+        site_url = config['ckan.site_url'].rstrip('/')
+        pkg_url = f"{site_url}/dataset/{pkg_dict['name']}"
+        
+        content = f"## {pkg_dict['title']}\n\n{pkg_dict.get('notes', '')}\n\n"
+        content += f"**Dataset URL**: [View on CKAN]({pkg_url})\n\n"
+        
+        # Add metadata fields
+        for field in settings['metadata_fields']:
+            if value := pkg_dict.get(field):
+                content += f"**{field.title()}**: {value}\n"
+        
+        # Add resources
+        if resources := pkg_dict.get('resources'):
+            content += "\n**Resources:**\n"
+            for res in resources:
+                res_url = f"{pkg_url}/resource/{res['id']}"
+                content += f"- [{res['name']}]({res_url})\n"
+
+        api.update_topic(pkg_dict['discourse_topic_id'], content)
+
+    except Exception as e:
+        log.error(f"Failed to update Discourse topic: {e}")
