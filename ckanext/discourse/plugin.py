@@ -59,12 +59,34 @@ class DiscoursePlugin(plugins.SingletonPlugin):
 
     def after_dataset_update(self, context, pkg_dict):
         """Queue topic update job."""
-        if self.settings and not pkg_dict.get('private') and pkg_dict.get('discourse_topic_id'):
-            enqueue(
-                update_discourse_topic,
-                args=[pkg_dict, self.settings],
-                title=f"Update Discourse topic for {pkg_dict['id']}"
-            )
+        # We need to get the full package with extras
+        try:
+            # Get the complete package information with extras
+            context_show = {'ignore_auth': True}
+            full_pkg = get_action('package_show')(context_show, {'id': pkg_dict['id']})
+            
+            # Extract extras as a dictionary for easier access
+            extras_dict = self._get_extras_dict(full_pkg)
+            topic_id = extras_dict.get('discourse_topic_id')
+            
+            log.info(f"Update triggered for dataset {pkg_dict['id']}, topic_id: {topic_id}")
+            
+            if self.settings and not full_pkg.get('private') and topic_id:
+                log.info(f"Scheduling update for Discourse topic {topic_id} for dataset {pkg_dict['id']}")
+                enqueue(
+                    update_discourse_topic,
+                    args=[full_pkg, self.settings],
+                    title=f"Update Discourse topic for {pkg_dict['id']}"
+                )
+            else:
+                if not topic_id:
+                    log.info(f"No discourse_topic_id found for dataset {pkg_dict['id']}, cannot update")
+                if full_pkg.get('private'):
+                    log.info(f"Dataset {pkg_dict['id']} is private, skipping update")
+                if not self.settings:
+                    log.info("Discourse settings not available, skipping update")
+        except Exception as e:
+            log.error(f"Error preparing dataset update in Discourse: {str(e)}", exc_info=True)
 
     def discourse_comments(self, pkg_dict=None):
         """Render comments section."""
@@ -72,7 +94,7 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             pkg = pkg_dict or toolkit.g.pkg_dict
             extras_dict = self._get_extras_dict(pkg) 
             topic_id = extras_dict.get('discourse_topic_id')
-            discourse_url = extras_dict.get('discourse_url', self.settings['url'])
+            discourse_url = extras_dict.get('discourse_url', self.settings['url'] if self.settings else '')
             
             log.debug(f"Rendering comments for package: {pkg.get('name')}")
             log.debug(f"Package extras: {extras_dict}")
@@ -82,7 +104,7 @@ class DiscoursePlugin(plugins.SingletonPlugin):
                 return '<p class="text-muted">Comments will be available after refreshing this page</p>'
             
             return toolkit.render_snippet('discourse_comments.html', { 
-                'discourse_url': self.settings['url'],
+                'discourse_url': self.settings['url'] if self.settings else discourse_url,
                 'topic_id': topic_id
             })
         except Exception as e:
@@ -262,6 +284,23 @@ def create_discourse_topic(pkg_dict, settings):
 def update_discourse_topic(pkg_dict, settings):
     """Background job: Update existing Discourse topic."""
     try:
+        log.info(f"Starting topic update for dataset: {pkg_dict['id']}")
+        
+        # Get topic_id from package extras
+        extras_dict = {}
+        if isinstance(pkg_dict.get('extras'), list):
+            extras_dict = {item['key']: item['value'] for item in pkg_dict['extras']}
+        elif isinstance(pkg_dict.get('extras'), dict):
+            extras_dict = pkg_dict['extras']
+        
+        topic_id = extras_dict.get('discourse_topic_id')
+        
+        if not topic_id:
+            log.error(f"Cannot update Discourse topic: no topic_id found for package {pkg_dict['id']}")
+            return
+            
+        log.info(f"Found topic_id {topic_id} for dataset {pkg_dict['id']}")
+        
         api = DiscourseApi(settings)
         site_url = config['discourse.site_url'].rstrip('/')
         pkg_url = f"{site_url}/dataset/{pkg_dict['name']}"
@@ -281,7 +320,47 @@ def update_discourse_topic(pkg_dict, settings):
                 res_url = f"{pkg_url}/resource/{res['id']}"
                 content += f"- [{res['name']}]({res_url})\n"
 
-        api.update_topic(pkg_dict['discourse_topic_id'], content)
+        log.debug(f"Updating topic {topic_id} with content: {content[:200]}...")
+        result = api.update_topic(topic_id, content)
+        log.info(f"Successfully updated Discourse topic {topic_id}")
+        
+        # Ensure the extras are preserved in the package
+        context = {'ignore_auth': True}
+        try:
+            # Get the latest version of the package
+            latest_pkg = get_action('package_show')(context, {'id': pkg_dict['id']})
+            
+            # Process extras to ensure discourse info is preserved
+            latest_extras_dict = {e['key']: e for e in latest_pkg.get('extras', [])}
+            preserved_extras = {
+                'discourse_topic_id': str(topic_id),
+                'discourse_url': extras_dict.get('discourse_url', f"{settings['url']}/t/{topic_id}")
+            }
+            
+            need_update = False
+            for key, value in preserved_extras.items():
+                if key not in latest_extras_dict or latest_extras_dict[key]['value'] != value:
+                    if key in latest_extras_dict:
+                        log.debug(f"Updating existing extra: {key}")
+                        latest_extras_dict[key]['value'] = value
+                    else:
+                        log.debug(f"Adding new extra: {key}")
+                        latest_extras_dict[key] = {'key': key, 'value': value}
+                    need_update = True
+            
+            # Only update if needed
+            if need_update:
+                latest_pkg['extras'] = list(latest_extras_dict.values())
+                log.debug(f"Ensuring discourse extras are preserved: {latest_pkg['extras']}")
+                updated_pkg = get_action('package_update')(context, latest_pkg)
+                log.info(f"Successfully ensured discourse extras for package {pkg_dict['id']}")
+            
+        except Exception as e:
+            log.error(f"Error ensuring discourse extras: {str(e)}", exc_info=True)
 
+    except requests.exceptions.RequestException as e:
+        log.error(f"Discourse API error updating topic: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            log.error(f"API response: {e.response.text}")
     except Exception as e:
-        log.error(f"Failed to update Discourse topic: {e}")
+        log.error(f"Unexpected error in topic update: {str(e)}", exc_info=True)
