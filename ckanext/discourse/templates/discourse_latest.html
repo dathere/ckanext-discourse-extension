@@ -1,8 +1,21 @@
-{#
-<div class="ckan-latest-comments">
-  <div id="latestcomments" class="discourse-widget">
-  <h2 class="discourse-widget-title">Latest Comments</h2>
-    {% for comment in discourse_latest_feed %}
+<div id="discourse-comments">
+  <h3>Discussion</h3>
+  <div id='discourse-comments-container'>
+    <script type="text/javascript">
+      (function() {
+        // Configure Discourse embedding
+        window.DiscourseEmbed = {
+          discourseUrl: '{{ discourse_url }}/',
+          topicId: '{{ topic_id }}',
+        };
+        
+        // Load Discourse embed script
+        var d = document.createElement('script'); 
+        d.type = 'text/javascript'; 
+        d.async = true;
+        d.src = window.DiscourseEmbed.discourseUrl + 'javascripts/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(d);
+      })();
+    </script>
   </div>
 </div>
-#}

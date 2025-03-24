@@ -1,0 +1,77 @@
+{% if h.discourse_is_configured() %}
+  <div id="discourse-comments">
+    <h3>Discussion</h3>
+    {% if not has_topic and h.check_access('package_update', {'id': pkg_id}) %}
+      <div class="discourse-start-discussion">
+        <p>Start a discussion about this dataset</p>
+        <button class="btn btn-primary" id="start-discourse-btn">Start discussions</button>
+        <div id="discourse-loading" style="display: none;">
+          <i class="fa fa-spinner fa-spin"></i> Creating discussion topic...
+        </div>
+        <div id="discourse-error" class="alert alert-danger" style="display: none;"></div>
+      </div>
+      
+      <script type="text/javascript">
+        // Initialize when document is ready
+        document.addEventListener('DOMContentLoaded', function() {
+          // Get the elements we need to work with
+          var startButton = document.getElementById('start-discourse-btn');
+          var loadingDiv = document.getElementById('discourse-loading');
+          var errorDiv = document.getElementById('discourse-error');
+          
+          if (startButton) {
+            // Set up click handler for the start discussion button
+            startButton.addEventListener('click', function() {
+              // Disable button and show loading
+              startButton.disabled = true;
+              loadingDiv.style.display = 'block';
+              errorDiv.style.display = 'none';
+              
+              // Make AJAX call to create the topic
+              var xhr = new XMLHttpRequest();
+              xhr.open('POST', '{{ h.url_for("discourse.create_topic", id=pkg_id) }}', true);
+              xhr.setRequestHeader('Content-Type', 'application/json');
+              xhr.responseType = 'json';
+              
+              xhr.onload = function() {
+                if (xhr.status === 200) {
+                  var response = xhr.response;
+                  if (response && response.success) {
+                    // Reload the page to show the embedded comments
+                    window.location.reload();
+                  } else {
+                    // Show error message
+                    errorDiv.textContent = (response && response.error) ? response.error : 'An unknown error occurred';
+                    errorDiv.style.display = 'block';
+                    startButton.disabled = false;
+                    loadingDiv.style.display = 'none';
+                  }
+                } else {
+                  // Show error message for non-200 status
+                  errorDiv.textContent = 'Server error: ' + xhr.status;
+                  errorDiv.style.display = 'block';
+                  startButton.disabled = false;
+                  loadingDiv.style.display = 'none';
+                }
+              };
+              
+              xhr.onerror = function() {
+                errorDiv.textContent = 'Failed to connect to the server';
+                errorDiv.style.display = 'block';
+                startButton.disabled = false;
+                loadingDiv.style.display = 'none';
+              };
+              
+              xhr.send();
+            });
+          }
+        });
+      </script>
+    {% else %}
+      <p class="text-muted">Discussion has not been started for this dataset yet.</p>
+      {% if not h.check_access('package_update', {'id': pkg_id}) %}
+        <p class="text-muted">Only dataset editors can start discussions.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endif %}
