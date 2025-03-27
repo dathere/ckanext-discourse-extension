@@ -1,7 +1,7 @@
 {% if h.discourse_is_configured() %}
   <div id="discourse-comments">
     <h3>Discussion</h3>
-    {% if not has_topic and h.check_access('package_update', {'id': pkg_id}) %}
+    {% if not has_topic and h.current_user %}
       <div class="discourse-start-discussion">
         <p>Start a discussion about this dataset</p>
         <button class="btn btn-primary" id="start-discourse-btn">Start discussions</button>
@@ -69,8 +69,8 @@
       </script>
     {% else %}
       <p class="text-muted">Discussion has not been started for this dataset yet.</p>
-      {% if not h.check_access('package_update', {'id': pkg_id}) %}
-        <p class="text-muted">Only dataset editors can start discussions.</p>
+      {% if not h.current_user %}
+        <p class="text-muted">Please log in to start a discussion.</p>
       {% endif %}
     {% endif %}
   </div>

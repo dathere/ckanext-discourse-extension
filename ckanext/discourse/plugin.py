@@ -49,6 +49,7 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             'discourse_comments_count': self.discourse_comments_count,
             'discourse_is_configured': self.discourse_is_configured,
             'discourse_has_topic': self.discourse_has_topic,
+            'current_user': self._get_current_user,
         }
     
     def get_blueprint(self):
@@ -69,7 +70,12 @@ class DiscoursePlugin(plugins.SingletonPlugin):
         if not self.settings:
             return jsonify({'success': False, 'error': 'Discourse not configured'})
             
+        # Check if user is logged in
+        if not toolkit.g.user:
+            return jsonify({'success': False, 'error': 'You must be logged in to start a discussion'})
+            
         try:
+            # Get the package
             context = {'user': toolkit.g.user, 'auth_user_obj': toolkit.g.userobj}
             pkg_dict = get_action('package_show')(context, {'id': id})
             
@@ -81,15 +87,31 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             result = create_discourse_topic(pkg_dict, self.settings)
             
             if result and result.get('topic_id'):
-                # Update package with topic_id in metadata schema
-                pkg_dict['topic_id'] = str(result['topic_id'])
-                get_action('package_update')(context, pkg_dict)
-                
-                return jsonify({
-                    'success': True, 
-                    'topic_id': result['topic_id'],
-                    'topic_url': result['topic_url']
-                })
+                try:
+                    # Create a system context to update the package regardless of user permissions
+                    sysadmin_context = {
+                        'ignore_auth': True,
+                        'user': toolkit.g.user
+                    }
+                    
+                    # Update package with topic_id in metadata schema
+                    pkg_dict['topic_id'] = str(result['topic_id'])
+                    get_action('package_update')(sysadmin_context, pkg_dict)
+                    
+                    return jsonify({
+                        'success': True, 
+                        'topic_id': result['topic_id'],
+                        'topic_url': result['topic_url']
+                    })
+                except logic.NotAuthorized:
+                    # If the user can't update the package, we need to handle this specially
+                    log.warning(f"User {toolkit.g.user} started discourse topic but couldn't update package {id}")
+                    return jsonify({
+                        'success': True,
+                        'topic_id': result['topic_id'],
+                        'topic_url': result['topic_url'],
+                        'warning': 'Topic created but package metadata could not be updated'
+                    })
             else:
                 return jsonify({'success': False, 'error': 'Failed to create topic'})
                 
@@ -143,6 +165,13 @@ class DiscoursePlugin(plugins.SingletonPlugin):
         """Check if package has a Discourse topic."""
         pkg = pkg_dict or toolkit.g.pkg_dict
         return bool(pkg.get('topic_id'))
+        
+    def _get_current_user(self):
+        """Helper method to check if a user is logged in."""
+        try:
+            return toolkit.g.user
+        except (AttributeError, TypeError):
+            return None
 
 class DiscourseApi:
     """Discourse API client with proper configuration handling."""
@@ -223,12 +252,16 @@ def create_discourse_topic(pkg_dict, settings):
         pkg_url = f"{site_url}/dataset/{pkg_dict['name']}" 
         
         # Generate content
-        content = f"## {pkg_dict['title']}\n\n{pkg_dict.get('detailed_info', '')}\n\n"
+        content = f"## {pkg_dict['title']}\n\n{pkg_dict.get('notes', '')}\n\n"
         content += f"**Dataset URL**: [View on CKAN]({pkg_url})\n\n"
         for field in settings['metadata_fields']:
             if value := pkg_dict.get(field):
                 content += f"**{field.title()}**: {value}\n"
-
+        if resources := pkg_dict.get('resources'):
+            content += "\n**Resources:**\n"
+            for res in resources:
+                res_url = f"{pkg_url}/resource/{res['id']}"
+                content += f"- [{res['name']}]({res_url})\n"
 
         result = api.create_topic(pkg_dict['title'], content, settings['category_id'])
         topic_id = result['topic_id']
