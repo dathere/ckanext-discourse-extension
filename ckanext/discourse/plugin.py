@@ -24,6 +24,7 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             'api_key': config_.get('discourse.api_key'),
             'username': config_.get('discourse.username'),
             'category_id': config_.get('discourse.category_id'),
+            'site_category_id': config_.get('discourse.site_category_id'),
             'metadata_fields': config_.get('discourse.metadata_fields', '').split(),
             'verify_ssl': toolkit.asbool(config_.get('discourse.verify_ssl', True))
         }
@@ -252,21 +253,25 @@ def create_discourse_topic(pkg_dict, settings):
         pkg_url = f"{site_url}/dataset/{pkg_dict['name']}" 
         
         # Generate content
-        content = f"## {pkg_dict['title']}\n\n{pkg_dict.get('notes', '')}\n\n"
+        # Remove extra newlines and ensure proper markdown formatting
+        detailed_info = pkg_dict.get('detailed_info', pkg_dict.get('notes', '')).strip()
+        # Remove any existing heading markers from detailed_info to avoid conflicts
+        detailed_info = '\n'.join(line for line in detailed_info.splitlines() 
+                                if not line.strip().startswith('#'))
+
+        content = f"# {pkg_dict['title']}\n\n{detailed_info}\n\n"
         content += f"**Dataset URL**: [View on CKAN]({pkg_url})\n\n"
         for field in settings['metadata_fields']:
             if value := pkg_dict.get(field):
                 content += f"**{field.title()}**: {value}\n"
-        if resources := pkg_dict.get('resources'):
-            content += "\n**Resources:**\n"
-            for res in resources:
-                res_url = f"{pkg_url}/resource/{res['id']}"
-                content += f"- [{res['name']}]({res_url})\n"
-
-        result = api.create_topic(pkg_dict['title'], content, settings['category_id'])
+        
+        # Choose the appropriate category based on dataset type
+        category_id = settings.get('site_category_id') if pkg_dict.get('type') == 'site' else settings['category_id']
+        
+        result = api.create_topic(pkg_dict['title'], content, category_id)
         topic_id = result['topic_id']
         topic_url = f"{settings['url']}/t/{topic_id}"
-        log.info(f"Successfully created Discourse topic {topic_id}")
+        log.info(f"Successfully created Discourse topic {topic_id} in category {category_id}")
         
         return {
             'topic_id': topic_id,
