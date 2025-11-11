@@ -142,21 +142,8 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             return ''
 
     def discourse_comments_count(self, pkg_dict=None):
-        """Get comment count from Discourse."""
-        try:
-            pkg = pkg_dict or toolkit.g.pkg_dict
-            topic_id = pkg.get('topic_id')
-            
-            if not (self.settings and topic_id):
-                return 0
-                
-            api = DiscourseApi(self.settings)
-            count = api.get_topic_comment_count(topic_id)
-            return count
-            
-        except Exception as e:
-            log.error(f"Error getting comment count: {str(e)}")
-            return 0
+        """Disabled: always return 0; never touches g.pkg_dict or calls HTTP."""
+        return 0
     
     def discourse_is_configured(self):
         """Check if Discourse is properly configured."""
