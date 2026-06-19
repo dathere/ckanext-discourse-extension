@@ -123,7 +123,9 @@ class DiscoursePlugin(plugins.SingletonPlugin):
     def discourse_comments(self, pkg_dict=None):
         """Render comments section."""
         try:
-            pkg = pkg_dict or toolkit.g.pkg_dict
+            pkg = pkg_dict or getattr(toolkit.g, 'pkg_dict', None)
+            if not pkg:
+                return ''
             topic_id = pkg.get('topic_id')
             
             if not (self.settings and topic_id):
@@ -144,7 +146,9 @@ class DiscoursePlugin(plugins.SingletonPlugin):
     def discourse_comments_count(self, pkg_dict=None):
         """Get comment count from Discourse."""
         try:
-            pkg = pkg_dict or toolkit.g.pkg_dict
+            pkg = pkg_dict or getattr(toolkit.g, 'pkg_dict', None)
+            if not pkg:
+                return 0
             topic_id = pkg.get('topic_id')
             
             if not (self.settings and topic_id):
@@ -164,7 +168,9 @@ class DiscoursePlugin(plugins.SingletonPlugin):
         
     def discourse_has_topic(self, pkg_dict=None):
         """Check if package has a Discourse topic."""
-        pkg = pkg_dict or toolkit.g.pkg_dict
+        pkg = pkg_dict or getattr(toolkit.g, 'pkg_dict', None)
+        if not pkg:
+            return False
         return bool(pkg.get('topic_id'))
         
     def _get_current_user(self):
