@@ -6,10 +6,18 @@ import json
 import logging
 from ckan.common import config
 from ckan.lib.jobs import enqueue
+from ckan.lib.redis import connect_to_redis
 from flask import Blueprint, jsonify, request
 
 log = logging.getLogger(__name__)
 get_action = logic.get_action
+
+# How long (seconds) to cache Discourse comment counts in Redis. Shared across
+# all uWSGI workers, so bot crawls hit Discourse at most once per topic per TTL.
+DEFAULT_COMMENT_COUNT_TTL = 43200  # 12 hours
+# Network timeout (seconds) for every Discourse API call. Without this a slow
+# or unreachable Discourse blocks the CKAN worker thread on page render.
+REQUEST_TIMEOUT = 5
 
 class DiscoursePlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.IConfigurable)
@@ -206,7 +214,8 @@ class DiscourseApi:
             url,
             headers=self.headers,
             json=data,
-            verify=self.verify_ssl
+            verify=self.verify_ssl,
+            timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
         return response.json()
@@ -221,21 +230,51 @@ class DiscourseApi:
             url,
             headers=self.headers,
             json=data,
-            verify=self.verify_ssl
+            verify=self.verify_ssl,
+            timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
         return response.json()
 
     def get_topic_comment_count(self, topic_id):
-        """Get total posts count excluding the initial post."""
+        """Get total posts count excluding the initial post, cached in Redis.
+
+        The cache is shared across all uWSGI workers, so heavy crawler traffic
+        results in at most one Discourse API call per topic per TTL period.
+        Falls back to a live fetch if Redis is unavailable.
+        """
+        cache_key = f'discourse:comment_count:{topic_id}'
+        ttl = toolkit.asint(
+            config.get('ckanext.pose_theme.discourse_count_cache_age',
+                       DEFAULT_COMMENT_COUNT_TTL)
+        )
+
+        redis = None
+        try:
+            redis = connect_to_redis()
+            cached = redis.get(cache_key)
+            if cached is not None:
+                return int(cached)
+        except Exception as e:
+            log.warning(f"Discourse comment-count cache read failed: {e}")
+
         url = f"{self.base_url}/t/{topic_id}.json"
         response = requests.get(
-            url, 
+            url,
             headers=self.headers,
-            verify=self.verify_ssl
+            verify=self.verify_ssl,
+            timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
-        return response.json()['posts_count'] - 1
+        count = response.json()['posts_count'] - 1
+
+        if redis is not None:
+            try:
+                redis.set(cache_key, count, ex=ttl)
+            except Exception as e:
+                log.warning(f"Discourse comment-count cache write failed: {e}")
+
+        return count
 
     def _get_first_post_id(self, topic_id):
         """Retrieve the first post ID of a topic."""
@@ -243,7 +282,8 @@ class DiscourseApi:
         response = requests.get(
             url,
             headers=self.headers,
-            verify=self.verify_ssl
+            verify=self.verify_ssl,
+            timeout=REQUEST_TIMEOUT
         )
         response.raise_for_status()
         return response.json()['post_stream']['posts'][0]['id']
