@@ -1,5 +1,11 @@
 <div id="discourse-comments">
   <h3>Discussion</h3>
+  {% if op_html %}
+  <div class="discourse-op cooked">
+    <a class="discourse-op-link" href="{{ discourse_url }}/t/{{ topic_id }}" target="_blank" rel="noopener noreferrer">View full topic on Discourse</a>
+    {{ op_html|safe }}
+  </div>
+  {% endif %}
   <div id='discourse-comments-container'>
     <script type="text/javascript">
       DiscourseEmbed = {
