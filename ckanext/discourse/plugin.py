@@ -33,6 +33,7 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             'username': config_.get('discourse.username'),
             'category_id': config_.get('discourse.category_id'),
             'site_category_id': config_.get('discourse.site_category_id'),
+            'tool_category_id': config_.get('discourse.tool_category_id'),
             'metadata_fields': config_.get('discourse.metadata_fields', '').split(),
             'verify_ssl': toolkit.asbool(config_.get('discourse.verify_ssl', True))
         }
@@ -143,9 +144,16 @@ class DiscoursePlugin(plugins.SingletonPlugin):
                     'has_topic': bool(topic_id)
                 })
             
-            return toolkit.render_snippet('discourse_comments.html', { 
+            op_html = ''
+            try:
+                op_html = DiscourseApi(self.settings).get_first_post_html(topic_id)
+            except Exception as e:
+                log.warning(f"Could not fetch Discourse OP for topic {topic_id}: {e}")
+
+            return toolkit.render_snippet('discourse_comments.html', {
                 'discourse_url': self.settings['url'],
-                'topic_id': topic_id
+                'topic_id': topic_id,
+                'op_html': op_html
             })
         except Exception as e:
             log.error(f"Error rendering comments: {str(e)}", exc_info=True)
@@ -287,6 +295,51 @@ class DiscourseApi:
         )
         response.raise_for_status()
         return response.json()['post_stream']['posts'][0]['id']
+
+    def get_first_post_html(self, topic_id):
+        """Return the OP (first post) as cooked HTML, cached in Redis.
+
+        Discourse's embed.js intentionally omits the topic's first post, so we
+        fetch and render it ourselves above the embedded replies. Cached across
+        workers like the comment count to avoid an API call on every render.
+        Relative upload paths in the cooked HTML are rewritten to absolute URLs
+        so images/links resolve when displayed on the CKAN page.
+        """
+        cache_key = f'discourse:op_html:{topic_id}'
+        ttl = toolkit.asint(
+            config.get('ckanext.pose_theme.discourse_count_cache_age',
+                       DEFAULT_COMMENT_COUNT_TTL)
+        )
+
+        redis = None
+        try:
+            redis = connect_to_redis()
+            cached = redis.get(cache_key)
+            if cached is not None:
+                return cached.decode('utf-8') if isinstance(cached, bytes) else cached
+        except Exception as e:
+            log.warning(f"Discourse OP cache read failed: {e}")
+
+        url = f"{self.base_url}/t/{topic_id}.json"
+        response = requests.get(
+            url,
+            headers=self.headers,
+            verify=self.verify_ssl,
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        cooked = response.json()['post_stream']['posts'][0].get('cooked', '')
+        # Discourse emits root-relative /uploads and /user_avatar paths.
+        cooked = cooked.replace('href="/', f'href="{self.base_url}/')
+        cooked = cooked.replace('src="/', f'src="{self.base_url}/')
+
+        if redis is not None:
+            try:
+                redis.set(cache_key, cooked, ex=ttl)
+            except Exception as e:
+                log.warning(f"Discourse OP cache write failed: {e}")
+
+        return cooked
  
 def create_discourse_topic(pkg_dict, settings):
     """Create Discourse topic for a dataset."""
@@ -312,7 +365,11 @@ def create_discourse_topic(pkg_dict, settings):
                 content += f"**{field.title()}**: {value}\n"
         
         # Choose the appropriate category based on dataset type
-        category_id = settings.get('site_category_id') if pkg_dict.get('type') == 'site' else settings['category_id']
+        category_by_type = {
+            'site': settings.get('site_category_id'),
+            'tool': settings.get('tool_category_id'),
+        }
+        category_id = category_by_type.get(pkg_dict.get('type')) or settings['category_id']
         
         result = api.create_topic(pkg_dict['title'], content, category_id)
         topic_id = result['topic_id']
