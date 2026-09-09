@@ -31,6 +31,9 @@
               var xhr = new XMLHttpRequest();
               xhr.open('POST', '{{ h.url_for("discourse.create_topic", id=pkg_id) }}', true);
               xhr.setRequestHeader('Content-Type', 'application/json');
+              // CKAN 2.10+ enforces CSRF on POST; the blueprint exemption is
+              // deprecated, so send the token explicitly.
+              xhr.setRequestHeader('X-CSRFToken', '{{ csrf_token() }}');
               xhr.responseType = 'json';
               
               xhr.onload = function() {

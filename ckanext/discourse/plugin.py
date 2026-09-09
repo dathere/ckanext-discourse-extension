@@ -63,17 +63,28 @@ class DiscoursePlugin(plugins.SingletonPlugin):
         }
     
     def get_blueprint(self):
-        """Register Blueprint for handling discourse actions."""
-        blueprint = Blueprint('discourse', __name__)
-        
-        blueprint.add_url_rule(
-            '/discourse/create_topic/<id>',
-            'create_topic',
-            self.create_topic,
-            methods=['GET', 'POST']
-        )
-        
-        return blueprint
+        """Register Blueprint for handling discourse actions.
+
+        Built once and cached. CKAN exempts plugin blueprints from CSRF by
+        calling get_blueprint() a second time, and flask_wtf compares the
+        exempted blueprint against the registered one by object identity
+        (app.blueprints.get(request.blueprint) in self._exempt_blueprints).
+        Returning a fresh Blueprint per call makes that check fail, so POSTs
+        are rejected with 400 "The CSRF token is missing."
+        """
+        if getattr(self, '_blueprint', None) is None:
+            blueprint = Blueprint('discourse', __name__)
+
+            blueprint.add_url_rule(
+                '/discourse/create_topic/<id>',
+                'create_topic',
+                self.create_topic,
+                methods=['GET', 'POST']
+            )
+
+            self._blueprint = blueprint
+
+        return self._blueprint
     
     def create_topic(self, id):
         """Handle the creation of a discourse topic for a dataset."""
