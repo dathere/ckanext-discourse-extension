@@ -129,8 +129,14 @@ class DiscoursePlugin(plugins.SingletonPlugin):
             log.error(f"Error creating topic: {str(e)}")
             return jsonify({'success': False, 'error': str(e)})
 
-    def discourse_comments(self, pkg_dict=None):
-        """Render comments section."""
+    def discourse_comments(self, pkg_dict=None, show_op=None):
+        """Render comments section.
+
+        The topic's first post is shown above the replies unless the package
+        sets show_discourse_content to false. Topics created from a package
+        copy its description into that post, so a page that already shows the
+        description can turn it off. show_op overrides the field.
+        """
         try:
             pkg = pkg_dict or getattr(toolkit.g, 'pkg_dict', None)
             if not pkg:
@@ -144,11 +150,15 @@ class DiscoursePlugin(plugins.SingletonPlugin):
                     'has_topic': bool(topic_id)
                 })
             
+            if show_op is None:
+                value = pkg.get('show_discourse_content')
+                show_op = value in (None, '') or toolkit.asbool(value)
             op_html = ''
-            try:
-                op_html = DiscourseApi(self.settings).get_first_post_html(topic_id)
-            except Exception as e:
-                log.warning(f"Could not fetch Discourse OP for topic {topic_id}: {e}")
+            if show_op:
+                try:
+                    op_html = DiscourseApi(self.settings).get_first_post_html(topic_id)
+                except Exception as e:
+                    log.warning(f"Could not fetch Discourse OP for topic {topic_id}: {e}")
 
             return toolkit.render_snippet('discourse_comments.html', {
                 'discourse_url': self.settings['url'],
